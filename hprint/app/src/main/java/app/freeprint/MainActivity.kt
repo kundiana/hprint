@@ -36,8 +36,10 @@ import java.io.File
 import kotlin.concurrent.thread
 
 /**
- * Milestone 3: choose a PDF or a picture inside the app (no Share menu needed) and print it
- * to a PCL printer (HP LaserJet 1320) over USB OTG.
+ * Milestone 4: choose a PDF or picture inside the app, print it over USB OTG.
+ * This build switches photo dithering from an ordered (Bayer) pattern to
+ * Floyd-Steinberg error diffusion, which looks far smoother for real photos,
+ * and adds a "busy" guard so two jobs can't be started on top of each other.
  */
 class MainActivity : Activity() {
 
@@ -49,6 +51,7 @@ class MainActivity : Activity() {
     private lateinit var fileLabel: TextView
     private lateinit var pagesInput: EditText
     private lateinit var ditherBox: CheckBox
+    private lateinit var printButton: Button
 
     // 0 = none, 1 = text test, 2 = graphics test, 3 = ask printer, 4 = print the loaded file
     private var pendingJob = 0
@@ -57,7 +60,7 @@ class MainActivity : Activity() {
     private var jobDither = false
     private var loadedKind = "" // "", "pdf" or "picture"
 
-    private val bayer = intArrayOf(0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
+    @Volatile private var busy = false
 
     private val jobHeader = "\u001B%-12345X@PJL\r\n@PJL ENTER LANGUAGE=PCL\r\n\u001BE\u001B&u300D"
         .toByteArray(Charsets.ISO_8859_1)
@@ -96,7 +99,7 @@ class MainActivity : Activity() {
         ditherBox = CheckBox(this).apply {
             text = "Photo mode (for pictures; text looks rougher)"
         }
-        val printButton = Button(this).apply {
+        printButton = Button(this).apply {
             text = "Print"
             setOnClickListener { startPrint(4) }
         }
@@ -180,6 +183,10 @@ class MainActivity : Activity() {
 
     @Suppress("DEPRECATION")
     private fun pickFile() {
+        if (busy) {
+            log("Still working on the previous job — please wait.")
+            return
+        }
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
@@ -256,7 +263,14 @@ class MainActivity : Activity() {
                         fileLabel.text = "Loaded: picture, ${bounds.outWidth} x ${bounds.outHeight}."
                         ditherBox.isChecked = true
                     }
-                    log("Picture loaded. Photo mode is switched on. Tap 'Print' when ready.")
+                    if (maxOf(bounds.outWidth, bounds.outHeight) < 1500) {
+                        log("Picture loaded (${bounds.outWidth} x ${bounds.outHeight}). " +
+                            "That is fairly low-resolution for a full page, so the print may look a " +
+                            "little rough — a higher-resolution photo (or a scanning app's PDF, for a " +
+                            "document) will come out sharper. Photo mode is switched on. Tap 'Print' when ready.")
+                    } else {
+                        log("Picture loaded. Photo mode is switched on. Tap 'Print' when ready.")
+                    }
                 }
             } catch (e: Throwable) {
                 loadedKind = ""
@@ -354,6 +368,10 @@ class MainActivity : Activity() {
     }
 
     private fun startPrint(job: Int) {
+        if (busy) {
+            log("Still working on the previous job — please wait.")
+            return
+        }
         if (job == 4) {
             if (loadedKind.isEmpty() || !File(cacheDir, "current.file").exists()) {
                 log("Nothing loaded yet. Tap 'Choose PDF or picture' first.")
@@ -445,38 +463,45 @@ class MainActivity : Activity() {
         Thread.sleep(1000)
     }
 
-    /** Run a job on a background thread. */
+    /** Run a job on a background thread. Guarded by 'busy' so two jobs can't collide. */
     private fun sendJob(job: Int) {
+        busy = true
+        runOnUiThread { printButton.isEnabled = false }
         thread {
-            val target = findTarget()
-            if (target == null) {
-                log("Printer not found. Re-plug it and try again.")
-                return@thread
-            }
-            val conn = openClaimed(target) ?: return@thread
             try {
-                when (job) {
-                    3 -> askPrinter(conn, target)
-                    4 -> {
-                        if (loadedKind == "picture") {
-                            printPictureJob(conn, target)
-                        } else {
-                            printPdfJob(conn, target)
+                val target = findTarget()
+                if (target == null) {
+                    log("Printer not found. Re-plug it and try again.")
+                    return@thread
+                }
+                val conn = openClaimed(target) ?: return@thread
+                try {
+                    when (job) {
+                        3 -> askPrinter(conn, target)
+                        4 -> {
+                            if (loadedKind == "picture") {
+                                printPictureJob(conn, target)
+                            } else {
+                                printPdfJob(conn, target)
+                            }
+                        }
+                        else -> {
+                            val data = if (job == 1) buildTextJob() else buildFullJob()
+                            log("Sending ${data.size} bytes...")
+                            if (writeAll(conn, target.out, data)) {
+                                log("Sent. Waiting for the printer to finish reading the job...")
+                                waitUntilPrinterCaughtUp(conn, target)
+                                log("Done. A page should be coming out now.")
+                            }
                         }
                     }
-                    else -> {
-                        val data = if (job == 1) buildTextJob() else buildFullJob()
-                        log("Sending ${data.size} bytes...")
-                        if (writeAll(conn, target.out, data)) {
-                            log("Sent. Waiting for the printer to finish reading the job...")
-                            waitUntilPrinterCaughtUp(conn, target)
-                            log("Done. A page should be coming out now.")
-                        }
-                    }
+                } finally {
+                    conn.releaseInterface(target.iface)
+                    conn.close()
                 }
             } finally {
-                conn.releaseInterface(target.iface)
-                conn.close()
+                busy = false
+                runOnUiThread { printButton.isEnabled = true }
             }
         }
     }
@@ -643,7 +668,16 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------- bitmap -> PCL
 
-    /** Turn a bitmap into one printed page of PCL raster graphics at 300 dpi. */
+    /**
+     * Turn a bitmap into one printed page of PCL raster graphics at 300 dpi.
+     *
+     * When 'dither' is on, this uses Floyd-Steinberg error diffusion: the
+     * rounding error from each black/white decision is carried into the
+     * neighbouring pixels (mostly the one to the right and the ones below).
+     * This looks much smoother for real photos than a fixed repeating
+     * pattern, especially once a lower-resolution photo has been stretched
+     * up to fill a whole page.
+     */
     private fun bitmapToPcl(bitmap: Bitmap, dither: Boolean): ByteArray {
         val bw = bitmap.width
         val bh = bitmap.height
@@ -657,20 +691,51 @@ class MainActivity : Activity() {
         val rowHeader = "\u001B*b${bytesPerRow}W".toByteArray(Charsets.ISO_8859_1)
         val pixels = IntArray(bw)
         val row = ByteArray(bytesPerRow)
-        for (y in 0 until bh) {
-            bitmap.getPixels(pixels, 0, bw, 0, y, bw, 1)
-            row.fill(0)
-            for (x in 0 until bw) {
-                val p = pixels[x]
-                val lum = (77 * ((p shr 16) and 0xFF) + 150 * ((p shr 8) and 0xFF) + 29 * (p and 0xFF)) shr 8
-                val threshold = if (dither) bayer[(y and 3) * 4 + (x and 3)] * 16 + 8 else 128
-                if (lum < threshold) {
-                    val idx = x shr 3
-                    row[idx] = (row[idx].toInt() or (0x80 ushr (x and 7))).toByte()
+
+        if (dither) {
+            // Error-diffusion buffers, one extra slot on each side so x-1 and x+1 are always valid.
+            var curErr = FloatArray(bw + 2)
+            var nextErr = FloatArray(bw + 2)
+            for (y in 0 until bh) {
+                bitmap.getPixels(pixels, 0, bw, 0, y, bw, 1)
+                row.fill(0)
+                nextErr.fill(0f)
+                for (x in 0 until bw) {
+                    val p = pixels[x]
+                    val lum = (77 * ((p shr 16) and 0xFF) + 150 * ((p shr 8) and 0xFF) + 29 * (p and 0xFF)) shr 8
+                    val adjusted = lum + curErr[x + 1]
+                    val black = adjusted < 128f
+                    if (black) {
+                        val idx = x shr 3
+                        row[idx] = (row[idx].toInt() or (0x80 ushr (x and 7))).toByte()
+                    }
+                    val error = adjusted - (if (black) 0f else 255f)
+                    curErr[x + 2] += error * 7f / 16f   // same row, next pixel
+                    nextErr[x] += error * 3f / 16f       // next row, previous pixel
+                    nextErr[x + 1] += error * 5f / 16f   // next row, same column
+                    nextErr[x + 2] += error * 1f / 16f   // next row, next pixel
                 }
+                out.write(rowHeader)
+                out.write(row)
+                val swap = curErr
+                curErr = nextErr
+                nextErr = swap
             }
-            out.write(rowHeader)
-            out.write(row)
+        } else {
+            for (y in 0 until bh) {
+                bitmap.getPixels(pixels, 0, bw, 0, y, bw, 1)
+                row.fill(0)
+                for (x in 0 until bw) {
+                    val p = pixels[x]
+                    val lum = (77 * ((p shr 16) and 0xFF) + 150 * ((p shr 8) and 0xFF) + 29 * (p and 0xFF)) shr 8
+                    if (lum < 128) {
+                        val idx = x shr 3
+                        row[idx] = (row[idx].toInt() or (0x80 ushr (x and 7))).toByte()
+                    }
+                }
+                out.write(rowHeader)
+                out.write(row)
+            }
         }
         bitmap.recycle()
         put("\u001B*rB")         // end raster graphics
