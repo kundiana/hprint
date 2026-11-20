@@ -6,34 +6,53 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.view.ViewGroup
+import android.os.ParcelFileDescriptor
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import java.io.ByteArrayOutputStream
+import java.io.File
 import kotlin.concurrent.thread
 
 /**
- * Milestone 1d: the printer DOES print. The end of each job was being lost because the
- * USB connection was closed right after the last byte was sent. Now we wait until the
- * printer has read the whole job before closing.
+ * Milestone 2: print a real PDF to a PCL printer (HP LaserJet 1320) over USB OTG.
+ *
+ * Share a PDF to hprint, pick pages, tap "Print PDF". Each page is drawn by Android's
+ * PdfRenderer, turned into black-and-white dots, and sent as PCL raster graphics.
  */
 class MainActivity : Activity() {
 
     private val actionPermission = "app.freeprint.USB_PERMISSION"
     private lateinit var usb: UsbManager
     private lateinit var logView: TextView
-    private var pendingJob = 0 // 0 = none, 1 = text test, 2 = graphics test, 3 = ask printer
-    private var preferredProtocol = 2 // 2 = two-way, 1 = one-way, 3 = special packet mode
+    private lateinit var scrollView: ScrollView
+    private lateinit var pdfLabel: TextView
+    private lateinit var pagesInput: EditText
+    private lateinit var ditherBox: CheckBox
+
+    // 0 = none, 1 = text test, 2 = graphics test, 3 = ask printer, 4 = print PDF
+    private var pendingJob = 0
+    private var preferredProtocol = 2 // 2 = two-way (the one that works), 1 = one-way, 3 = special
+    private var jobPagesText = ""
+    private var jobDither = false
+
+    private val bayer = intArrayOf(0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
 
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -50,24 +69,38 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         usb = getSystemService(Context.USB_SERVICE) as UsbManager
 
-        val root = LinearLayout(this).apply {
+        val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 48, 32, 32)
         }
+        pdfLabel = TextView(this).apply {
+            text = "No PDF yet. In WhatsApp, Files or any PDF viewer, choose Share, then hprint."
+            textSize = 15f
+        }
+        pagesInput = EditText(this).apply {
+            hint = "Pages, e.g. 1-3 (empty = all pages)"
+        }
+        ditherBox = CheckBox(this).apply {
+            text = "Photo mode (for pictures; text looks rougher)"
+        }
+        val printPdf = Button(this).apply {
+            text = "Print PDF"
+            setOnClickListener { startPrint(4) }
+        }
         val scan = Button(this).apply {
-            text = "1. Find printer"
+            text = "Find printer"
             setOnClickListener { describeDevices() }
         }
         val textTest = Button(this).apply {
-            text = "2. Print text test"
+            text = "Text test"
             setOnClickListener { startPrint(1) }
         }
         val fullTest = Button(this).apply {
-            text = "3. Print text + graphics test"
+            text = "Text + graphics test"
             setOnClickListener { startPrint(2) }
         }
         val askTest = Button(this).apply {
-            text = "4. Ask printer its name"
+            text = "Ask printer its name"
             setOnClickListener { startPrint(3) }
         }
         val modeButton = Button(this).apply {
@@ -78,24 +111,25 @@ class MainActivity : Activity() {
                     1 -> 3
                     else -> 2
                 }
-                log("USB mode is now protocol $preferredProtocol (2 = two-way, 1 = one-way, 3 = special). Tap a test again.")
+                log("USB mode is now protocol $preferredProtocol (2 = two-way, 1 = one-way, 3 = special). Use 2 normally.")
             }
         }
         logView = TextView(this).apply {
             textSize = 13f
             setTextIsSelectable(true)
         }
-        val scroll = ScrollView(this).apply { addView(logView) }
-        root.addView(scan)
-        root.addView(textTest)
-        root.addView(fullTest)
-        root.addView(askTest)
-        root.addView(modeButton)
-        root.addView(
-            scroll,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-        )
-        setContentView(root)
+        column.addView(pdfLabel)
+        column.addView(pagesInput)
+        column.addView(ditherBox)
+        column.addView(printPdf)
+        column.addView(scan)
+        column.addView(textTest)
+        column.addView(fullTest)
+        column.addView(askTest)
+        column.addView(modeButton)
+        column.addView(logView)
+        scrollView = ScrollView(this).apply { addView(column) }
+        setContentView(scrollView)
 
         val filter = IntentFilter(actionPermission)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -103,7 +137,13 @@ class MainActivity : Activity() {
         } else {
             registerReceiver(permissionReceiver, filter)
         }
-        log("Switch the printer OFF and ON first. Plug it in with the OTG cable, then tap 'Find printer'.")
+        log("Plug the printer in with the OTG cable and switch it on. Then share a PDF to hprint.")
+        handleIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
     }
 
     override fun onDestroy() {
@@ -114,10 +154,73 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- helpers
 
     private fun log(message: String) {
-        runOnUiThread { logView.append(message + "\n") }
+        runOnUiThread {
+            logView.append(message + "\n")
+            scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
+        }
     }
 
     private class Target(val device: UsbDevice, val iface: UsbInterface, val out: UsbEndpoint)
+
+    // ------------------------------------------------------------ receiving a PDF
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent == null) return
+        val uri: Uri? = when (intent.action) {
+            Intent.ACTION_SEND -> {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                }
+            }
+            Intent.ACTION_VIEW -> intent.data
+            else -> null
+        }
+        if (uri != null) loadPdf(uri)
+    }
+
+    /** Copy the shared PDF into the app's own storage, then count its pages. */
+    private fun loadPdf(uri: Uri) {
+        log("Loading the PDF...")
+        thread {
+            try {
+                val file = File(cacheDir, "current.pdf")
+                val input = contentResolver.openInputStream(uri)
+                if (input == null) {
+                    log("Could not open that file.")
+                    return@thread
+                }
+                input.use { src -> file.outputStream().use { dst -> src.copyTo(dst) } }
+                val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                val renderer = PdfRenderer(pfd)
+                val count = renderer.pageCount
+                renderer.close()
+                pfd.close()
+                runOnUiThread { pdfLabel.text = "PDF loaded: $count page(s)." }
+                log("PDF loaded: $count page(s). Choose pages if you like, then tap 'Print PDF'.")
+            } catch (e: Throwable) {
+                log("Could not read that file as a PDF: ${e.message}")
+            }
+        }
+    }
+
+    /** "" = all pages, "3" = page 3, "2-5" = pages 2 to 5. Returns zero-based page numbers. */
+    private fun parsePages(text: String, count: Int): List<Int> {
+        val t = text.trim()
+        if (t.isEmpty()) return (0 until count).toList()
+        val parts = t.split("-")
+        val a = parts[0].trim().toIntOrNull()
+        val b = if (parts.size > 1) parts[1].trim().toIntOrNull() else a
+        if (a == null || b == null) return emptyList()
+        val from = maxOf(1, minOf(a, b))
+        val to = minOf(count, maxOf(a, b))
+        if (from > to) return emptyList()
+        return (from - 1 until to).toList()
+    }
+
+    // --------------------------------------------------------------- USB
 
     /** List every USB device and interface, so we can see exactly what the printer offers. */
     private fun describeDevices() {
@@ -192,6 +295,14 @@ class MainActivity : Activity() {
     }
 
     private fun startPrint(job: Int) {
+        if (job == 4) {
+            if (!File(cacheDir, "current.pdf").exists()) {
+                log("No PDF loaded yet. Share a PDF to hprint first.")
+                return
+            }
+            jobPagesText = pagesInput.text.toString()
+            jobDither = ditherBox.isChecked
+        }
         val target = findTarget()
         if (target == null) {
             describeDevices()
@@ -275,7 +386,7 @@ class MainActivity : Activity() {
         Thread.sleep(1000)
     }
 
-    /** Run a job (print test or question) on a background thread. */
+    /** Run a job on a background thread. */
     private fun sendJob(job: Int) {
         thread {
             val target = findTarget()
@@ -285,15 +396,17 @@ class MainActivity : Activity() {
             }
             val conn = openClaimed(target) ?: return@thread
             try {
-                if (job == 3) {
-                    askPrinter(conn, target)
-                } else {
-                    val data = if (job == 1) buildTextJob() else buildFullJob()
-                    log("Sending ${data.size} bytes...")
-                    if (writeAll(conn, target.out, data)) {
-                        log("Sent. Waiting for the printer to finish reading the job...")
-                        waitUntilPrinterCaughtUp(conn, target)
-                        log("Done. A page should be coming out now.")
+                when (job) {
+                    3 -> askPrinter(conn, target)
+                    4 -> printPdfJob(conn, target)
+                    else -> {
+                        val data = if (job == 1) buildTextJob() else buildFullJob()
+                        log("Sending ${data.size} bytes...")
+                        if (writeAll(conn, target.out, data)) {
+                            log("Sent. Waiting for the printer to finish reading the job...")
+                            waitUntilPrinterCaughtUp(conn, target)
+                            log("Done. A page should be coming out now.")
+                        }
                     }
                 }
             } finally {
@@ -332,7 +445,103 @@ class MainActivity : Activity() {
         }
     }
 
-    // ------------------------------------------------------------- PCL jobs
+    // ------------------------------------------------------------- printing a PDF
+
+    private fun printPdfJob(conn: UsbDeviceConnection, target: Target) {
+        val file = File(cacheDir, "current.pdf")
+        if (!file.exists()) {
+            log("No PDF loaded. Share a PDF to hprint first.")
+            return
+        }
+        var pfd: ParcelFileDescriptor? = null
+        var renderer: PdfRenderer? = null
+        try {
+            pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            renderer = PdfRenderer(pfd)
+            val pages = parsePages(jobPagesText, renderer.pageCount)
+            if (pages.isEmpty()) {
+                log("Those page numbers do not match this PDF (it has ${renderer.pageCount} pages).")
+                return
+            }
+            log("Printing ${pages.size} page(s)...")
+            val header = "\u001B%-12345X@PJL\r\n@PJL ENTER LANGUAGE=PCL\r\n\u001BE\u001B&u300D"
+                .toByteArray(Charsets.ISO_8859_1)
+            if (!writeAll(conn, target.out, header)) return
+            for ((i, pageIndex) in pages.withIndex()) {
+                log("Preparing page ${pageIndex + 1} (${i + 1} of ${pages.size})...")
+                val data = renderPageToPcl(renderer, pageIndex, jobDither)
+                if (!writeAll(conn, target.out, data)) return
+                log("Sent page ${pageIndex + 1}.")
+            }
+            val footer = "\u001BE\u001B%-12345X".toByteArray(Charsets.ISO_8859_1)
+            if (!writeAll(conn, target.out, footer)) return
+            log("All pages sent. Waiting for the printer to finish reading...")
+            waitUntilPrinterCaughtUp(conn, target)
+            log("Done.")
+        } catch (e: Throwable) {
+            log("Printing failed: ${e.message}")
+        } finally {
+            renderer?.close()
+            pfd?.close()
+        }
+    }
+
+    /**
+     * Draw one PDF page and turn it into PCL raster graphics at 300 dpi.
+     * The page is scaled to fit inside the printer's printable area (about 7.9 x 11.3 inches).
+     */
+    private fun renderPageToPcl(renderer: PdfRenderer, index: Int, dither: Boolean): ByteArray {
+        val maxW = 2376 // dots, a multiple of 8
+        val maxH = 3400 // dots
+        val page = renderer.openPage(index)
+        val bitmap: Bitmap = try {
+            val scale = minOf(maxW.toFloat() / page.width, maxH.toFloat() / page.height)
+            val bw = maxOf(8, minOf(maxW, (page.width * scale).toInt()))
+            val bh = maxOf(1, minOf(maxH, (page.height * scale).toInt()))
+            val b = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+            b.eraseColor(Color.WHITE)
+            val m = Matrix()
+            m.setScale(scale, scale)
+            page.render(b, null, m, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+            b
+        } finally {
+            page.close()
+        }
+
+        val bw = bitmap.width
+        val bh = bitmap.height
+        val bytesPerRow = (bw + 7) / 8
+        val out = ByteArrayOutputStream(bh * (bytesPerRow + 8) + 64)
+        fun put(s: String) = out.write(s.toByteArray(Charsets.ISO_8859_1))
+        put("\u001B*p0x0Y")      // top-left of the printable area
+        put("\u001B*t300R")      // raster resolution: 300 dpi
+        put("\u001B*r1A")        // start raster graphics
+        put("\u001B*b0M")        // no compression
+        val rowHeader = "\u001B*b${bytesPerRow}W".toByteArray(Charsets.ISO_8859_1)
+        val pixels = IntArray(bw)
+        val row = ByteArray(bytesPerRow)
+        for (y in 0 until bh) {
+            bitmap.getPixels(pixels, 0, bw, 0, y, bw, 1)
+            row.fill(0)
+            for (x in 0 until bw) {
+                val p = pixels[x]
+                val lum = (77 * ((p shr 16) and 0xFF) + 150 * ((p shr 8) and 0xFF) + 29 * (p and 0xFF)) shr 8
+                val threshold = if (dither) bayer[(y and 3) * 4 + (x and 3)] * 16 + 8 else 128
+                if (lum < threshold) {
+                    val idx = x shr 3
+                    row[idx] = (row[idx].toInt() or (0x80 ushr (x and 7))).toByte()
+                }
+            }
+            out.write(rowHeader)
+            out.write(row)
+        }
+        bitmap.recycle()
+        put("\u001B*rB")         // end raster graphics
+        put("\u000C")            // eject the page
+        return out.toByteArray()
+    }
+
+    // ------------------------------------------------------------- PCL test jobs
     // PCL commands start with the ESC character (\u001B).
     // Each job is wrapped in a PJL header/footer ("\u001B%-12345X" is the standard job delimiter).
 
