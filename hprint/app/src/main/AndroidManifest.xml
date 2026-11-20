@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-feature
-        android:name="android.hardware.usb.host"
-        android:required="true" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="true" />
 
     <application
+        android:label="hprint"
         android:allowBackup="false"
         android:largeHeap="true"
-        android:label="hprint"
         android:theme="@android:style/Theme.DeviceDefault.Light">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -24,6 +23,11 @@
                 <data android:mimeType="application/pdf" />
             </intent-filter>
             <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
@@ -31,5 +35,4 @@
             </intent-filter>
         </activity>
     </application>
-
 </manifest>
