@@ -7,8 +7,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.pdf.PdfRenderer
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
@@ -16,6 +20,7 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -31,28 +36,32 @@ import java.io.File
 import kotlin.concurrent.thread
 
 /**
- * Milestone 2: print a real PDF to a PCL printer (HP LaserJet 1320) over USB OTG.
- *
- * Share a PDF to hprint, pick pages, tap "Print PDF". Each page is drawn by Android's
- * PdfRenderer, turned into black-and-white dots, and sent as PCL raster graphics.
+ * Milestone 3: choose a PDF or a picture inside the app (no Share menu needed) and print it
+ * to a PCL printer (HP LaserJet 1320) over USB OTG.
  */
 class MainActivity : Activity() {
 
     private val actionPermission = "app.freeprint.USB_PERMISSION"
+    private val pickRequest = 42
     private lateinit var usb: UsbManager
     private lateinit var logView: TextView
     private lateinit var scrollView: ScrollView
-    private lateinit var pdfLabel: TextView
+    private lateinit var fileLabel: TextView
     private lateinit var pagesInput: EditText
     private lateinit var ditherBox: CheckBox
 
-    // 0 = none, 1 = text test, 2 = graphics test, 3 = ask printer, 4 = print PDF
+    // 0 = none, 1 = text test, 2 = graphics test, 3 = ask printer, 4 = print the loaded file
     private var pendingJob = 0
     private var preferredProtocol = 2 // 2 = two-way (the one that works), 1 = one-way, 3 = special
     private var jobPagesText = ""
     private var jobDither = false
+    private var loadedKind = "" // "", "pdf" or "picture"
 
     private val bayer = intArrayOf(0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
+
+    private val jobHeader = "\u001B%-12345X@PJL\r\n@PJL ENTER LANGUAGE=PCL\r\n\u001BE\u001B&u300D"
+        .toByteArray(Charsets.ISO_8859_1)
+    private val jobFooter = "\u001BE\u001B%-12345X".toByteArray(Charsets.ISO_8859_1)
 
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -73,18 +82,22 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 48, 32, 32)
         }
-        pdfLabel = TextView(this).apply {
-            text = "No PDF yet. In WhatsApp, Files or any PDF viewer, choose Share, then hprint."
+        fileLabel = TextView(this).apply {
+            text = "Nothing loaded yet. Tap 'Choose PDF or picture' below."
             textSize = 15f
         }
+        val pickButton = Button(this).apply {
+            text = "Choose PDF or picture"
+            setOnClickListener { pickFile() }
+        }
         pagesInput = EditText(this).apply {
-            hint = "Pages, e.g. 1-3 (empty = all pages)"
+            hint = "Pages, e.g. 1-3 (empty = all pages; PDFs only)"
         }
         ditherBox = CheckBox(this).apply {
             text = "Photo mode (for pictures; text looks rougher)"
         }
-        val printPdf = Button(this).apply {
-            text = "Print PDF"
+        val printButton = Button(this).apply {
+            text = "Print"
             setOnClickListener { startPrint(4) }
         }
         val scan = Button(this).apply {
@@ -118,10 +131,11 @@ class MainActivity : Activity() {
             textSize = 13f
             setTextIsSelectable(true)
         }
-        column.addView(pdfLabel)
+        column.addView(fileLabel)
+        column.addView(pickButton)
         column.addView(pagesInput)
         column.addView(ditherBox)
-        column.addView(printPdf)
+        column.addView(printButton)
         column.addView(scan)
         column.addView(textTest)
         column.addView(fullTest)
@@ -137,7 +151,7 @@ class MainActivity : Activity() {
         } else {
             registerReceiver(permissionReceiver, filter)
         }
-        log("Plug the printer in with the OTG cable and switch it on. Then share a PDF to hprint.")
+        log("Plug the printer in with the OTG cable and switch it on. Then choose a PDF or picture.")
         handleIntent(intent)
     }
 
@@ -162,7 +176,26 @@ class MainActivity : Activity() {
 
     private class Target(val device: UsbDevice, val iface: UsbInterface, val out: UsbEndpoint)
 
-    // ------------------------------------------------------------ receiving a PDF
+    // ------------------------------------------------------------ choosing a file
+
+    @Suppress("DEPRECATION")
+    private fun pickFile() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/pdf", "image/*"))
+        }
+        startActivityForResult(intent, pickRequest)
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == pickRequest && resultCode == RESULT_OK) {
+            val uri = data?.data
+            if (uri != null) loadFile(uri) else log("No file was chosen.")
+        }
+    }
 
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
@@ -178,30 +211,56 @@ class MainActivity : Activity() {
             Intent.ACTION_VIEW -> intent.data
             else -> null
         }
-        if (uri != null) loadPdf(uri)
+        if (uri != null) loadFile(uri)
     }
 
-    /** Copy the shared PDF into the app's own storage, then count its pages. */
-    private fun loadPdf(uri: Uri) {
-        log("Loading the PDF...")
+    /** Copy the chosen file into the app's own storage, then work out whether it is a PDF or a picture. */
+    private fun loadFile(uri: Uri) {
+        log("Loading the file...")
         thread {
             try {
-                val file = File(cacheDir, "current.pdf")
+                val file = File(cacheDir, "current.file")
                 val input = contentResolver.openInputStream(uri)
                 if (input == null) {
                     log("Could not open that file.")
                     return@thread
                 }
                 input.use { src -> file.outputStream().use { dst -> src.copyTo(dst) } }
-                val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-                val renderer = PdfRenderer(pfd)
-                val count = renderer.pageCount
-                renderer.close()
-                pfd.close()
-                runOnUiThread { pdfLabel.text = "PDF loaded: $count page(s)." }
-                log("PDF loaded: $count page(s). Choose pages if you like, then tap 'Print PDF'.")
+
+                val magic = ByteArray(5)
+                val got = file.inputStream().use { it.read(magic) }
+                val isPdf = got == 5 && String(magic, Charsets.ISO_8859_1) == "%PDF-"
+                if (isPdf) {
+                    val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                    val renderer = PdfRenderer(pfd)
+                    val count = renderer.pageCount
+                    renderer.close()
+                    pfd.close()
+                    loadedKind = "pdf"
+                    runOnUiThread {
+                        fileLabel.text = "Loaded: PDF, $count page(s)."
+                        ditherBox.isChecked = false
+                    }
+                    log("PDF loaded: $count page(s). Choose pages if you like, then tap 'Print'.")
+                } else {
+                    val bounds = BitmapFactory.Options()
+                    bounds.inJustDecodeBounds = true
+                    BitmapFactory.decodeFile(file.absolutePath, bounds)
+                    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                        loadedKind = ""
+                        log("That file is not a PDF or a picture hprint can read.")
+                        return@thread
+                    }
+                    loadedKind = "picture"
+                    runOnUiThread {
+                        fileLabel.text = "Loaded: picture, ${bounds.outWidth} x ${bounds.outHeight}."
+                        ditherBox.isChecked = true
+                    }
+                    log("Picture loaded. Photo mode is switched on. Tap 'Print' when ready.")
+                }
             } catch (e: Throwable) {
-                log("Could not read that file as a PDF: ${e.message}")
+                loadedKind = ""
+                log("Could not read that file: ${e.message}")
             }
         }
     }
@@ -296,8 +355,8 @@ class MainActivity : Activity() {
 
     private fun startPrint(job: Int) {
         if (job == 4) {
-            if (!File(cacheDir, "current.pdf").exists()) {
-                log("No PDF loaded yet. Share a PDF to hprint first.")
+            if (loadedKind.isEmpty() || !File(cacheDir, "current.file").exists()) {
+                log("Nothing loaded yet. Tap 'Choose PDF or picture' first.")
                 return
             }
             jobPagesText = pagesInput.text.toString()
@@ -398,7 +457,13 @@ class MainActivity : Activity() {
             try {
                 when (job) {
                     3 -> askPrinter(conn, target)
-                    4 -> printPdfJob(conn, target)
+                    4 -> {
+                        if (loadedKind == "picture") {
+                            printPictureJob(conn, target)
+                        } else {
+                            printPdfJob(conn, target)
+                        }
+                    }
                     else -> {
                         val data = if (job == 1) buildTextJob() else buildFullJob()
                         log("Sending ${data.size} bytes...")
@@ -448,9 +513,9 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------- printing a PDF
 
     private fun printPdfJob(conn: UsbDeviceConnection, target: Target) {
-        val file = File(cacheDir, "current.pdf")
+        val file = File(cacheDir, "current.file")
         if (!file.exists()) {
-            log("No PDF loaded. Share a PDF to hprint first.")
+            log("Nothing loaded. Choose a PDF first.")
             return
         }
         var pfd: ParcelFileDescriptor? = null
@@ -464,17 +529,14 @@ class MainActivity : Activity() {
                 return
             }
             log("Printing ${pages.size} page(s)...")
-            val header = "\u001B%-12345X@PJL\r\n@PJL ENTER LANGUAGE=PCL\r\n\u001BE\u001B&u300D"
-                .toByteArray(Charsets.ISO_8859_1)
-            if (!writeAll(conn, target.out, header)) return
+            if (!writeAll(conn, target.out, jobHeader)) return
             for ((i, pageIndex) in pages.withIndex()) {
                 log("Preparing page ${pageIndex + 1} (${i + 1} of ${pages.size})...")
                 val data = renderPageToPcl(renderer, pageIndex, jobDither)
                 if (!writeAll(conn, target.out, data)) return
                 log("Sent page ${pageIndex + 1}.")
             }
-            val footer = "\u001BE\u001B%-12345X".toByteArray(Charsets.ISO_8859_1)
-            if (!writeAll(conn, target.out, footer)) return
+            if (!writeAll(conn, target.out, jobFooter)) return
             log("All pages sent. Waiting for the printer to finish reading...")
             waitUntilPrinterCaughtUp(conn, target)
             log("Done.")
@@ -486,13 +548,10 @@ class MainActivity : Activity() {
         }
     }
 
-    /**
-     * Draw one PDF page and turn it into PCL raster graphics at 300 dpi.
-     * The page is scaled to fit inside the printer's printable area (about 7.9 x 11.3 inches).
-     */
+    /** Draw one PDF page, scaled to fit the printer's printable area, and turn it into PCL. */
     private fun renderPageToPcl(renderer: PdfRenderer, index: Int, dither: Boolean): ByteArray {
-        val maxW = 2376 // dots, a multiple of 8
-        val maxH = 3400 // dots
+        val maxW = 2376 // dots at 300 dpi, a multiple of 8
+        val maxH = 3400
         val page = renderer.openPage(index)
         val bitmap: Bitmap = try {
             val scale = minOf(maxW.toFloat() / page.width, maxH.toFloat() / page.height)
@@ -507,7 +566,85 @@ class MainActivity : Activity() {
         } finally {
             page.close()
         }
+        return bitmapToPcl(bitmap, dither)
+    }
 
+    // ------------------------------------------------------------- printing a picture
+
+    private fun printPictureJob(conn: UsbDeviceConnection, target: Target) {
+        try {
+            log("Preparing the picture...")
+            val bitmap = loadPictureForPrint(File(cacheDir, "current.file")) ?: run {
+                log("Could not read that picture.")
+                return
+            }
+            val data = bitmapToPcl(bitmap, jobDither)
+            if (!writeAll(conn, target.out, jobHeader)) return
+            if (!writeAll(conn, target.out, data)) return
+            if (!writeAll(conn, target.out, jobFooter)) return
+            log("Sent. Waiting for the printer to finish reading...")
+            waitUntilPrinterCaughtUp(conn, target)
+            log("Done.")
+        } catch (e: Throwable) {
+            log("Printing failed: ${e.message}")
+        }
+    }
+
+    /** Load a picture, apply the camera's rotation, and fit it onto a white page-sized bitmap. */
+    private fun loadPictureForPrint(file: File): Bitmap? {
+        val bounds = BitmapFactory.Options()
+        bounds.inJustDecodeBounds = true
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        // Load it at about the size we need, to save memory.
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 3400) sample *= 2
+        val opts = BitmapFactory.Options()
+        opts.inSampleSize = sample
+        opts.inPreferredConfig = Bitmap.Config.RGB_565
+        var bmp: Bitmap = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return null
+
+        // Respect the camera's rotation flag, if there is one.
+        var degrees = 0f
+        try {
+            val exif = ExifInterface(file.absolutePath)
+            degrees = when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
+            }
+        } catch (e: Exception) {
+            // no rotation information; carry on
+        }
+        val sideways = degrees == 90f || degrees == 270f
+        val shownW = if (sideways) bmp.height else bmp.width
+        val shownH = if (sideways) bmp.width else bmp.height
+        if (shownW > shownH) degrees += 90f // wide pictures use the tall page better when turned
+        if (degrees % 360f != 0f) {
+            val m = Matrix()
+            m.postRotate(degrees)
+            val turned = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+            if (turned !== bmp) bmp.recycle()
+            bmp = turned
+        }
+
+        val scale = minOf(2376f / bmp.width, 3400f / bmp.height)
+        val w = maxOf(8, (bmp.width * scale).toInt())
+        val h = maxOf(1, (bmp.height * scale).toInt())
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.WHITE)
+        canvas.drawBitmap(bmp, null, Rect(0, 0, w, h), Paint(Paint.FILTER_BITMAP_FLAG))
+        bmp.recycle()
+        return out
+    }
+
+    // ------------------------------------------------------------- bitmap -> PCL
+
+    /** Turn a bitmap into one printed page of PCL raster graphics at 300 dpi. */
+    private fun bitmapToPcl(bitmap: Bitmap, dither: Boolean): ByteArray {
         val bw = bitmap.width
         val bh = bitmap.height
         val bytesPerRow = (bw + 7) / 8
