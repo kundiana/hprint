@@ -23,14 +23,9 @@ import java.io.ByteArrayOutputStream
 import kotlin.concurrent.thread
 
 /**
- * Milestone 1c: find out why the HP LaserJet 1320 is not printing.
- *
- * New in this version:
- *  - Button 4 asks the printer its name (PJL INFO ID) and reads the answer.
- *    An answer proves the phone and printer talk in BOTH directions.
- *  - "Switch USB mode" lets us try the printer's other USB modes.
- *  - Jobs now start with a standard PJL header that tells the printer "this is PCL".
- *  - The paper-size command is gone, in case a size mismatch was making it wait.
+ * Milestone 1d: the printer DOES print. The end of each job was being lost because the
+ * USB connection was closed right after the last byte was sent. Now we wait until the
+ * printer has read the whole job before closing.
  */
 class MainActivity : Activity() {
 
@@ -182,6 +177,20 @@ class MainActivity : Activity() {
         return best
     }
 
+    /** The bulk-in endpoint of an interface (where the printer's answers come from), if any. */
+    private fun findInEndpoint(iface: UsbInterface): UsbEndpoint? {
+        var found: UsbEndpoint? = null
+        for (e in 0 until iface.endpointCount) {
+            val ep = iface.getEndpoint(e)
+            if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK &&
+                ep.direction == UsbConstants.USB_DIR_IN
+            ) {
+                found = ep
+            }
+        }
+        return found
+    }
+
     private fun startPrint(job: Int) {
         val target = findTarget()
         if (target == null) {
@@ -237,6 +246,35 @@ class MainActivity : Activity() {
         return true
     }
 
+    /**
+     * Closing the USB connection right after sending makes Android reset the printer's USB
+     * buffer, which throws away data the printer has not read yet. So at the end of a job
+     * we ask the printer a question and wait for the answer: it only answers after it has
+     * read everything that came before the question.
+     */
+    private fun waitUntilPrinterCaughtUp(conn: UsbDeviceConnection, target: Target) {
+        val inEndpoint = findInEndpoint(target.iface)
+        if (inEndpoint == null) {
+            log("One-way USB mode: cannot tell when the printer is done, so waiting 8 seconds.")
+            Thread.sleep(8000)
+            return
+        }
+        val question = "\u001B%-12345X@PJL INFO ID\r\n\u001B%-12345X".toByteArray(Charsets.ISO_8859_1)
+        if (!writeAll(conn, target.out, question)) return
+        val buf = ByteArray(512)
+        val end = System.currentTimeMillis() + 30_000
+        var answered = false
+        while (System.currentTimeMillis() < end) {
+            val n = conn.bulkTransfer(inEndpoint, buf, buf.size, 500)
+            if (n > 0) {
+                answered = true
+                break
+            }
+        }
+        if (!answered) log("The printer did not answer within 30 seconds.")
+        Thread.sleep(1000)
+    }
+
     /** Run a job (print test or question) on a background thread. */
     private fun sendJob(job: Int) {
         thread {
@@ -253,7 +291,9 @@ class MainActivity : Activity() {
                     val data = if (job == 1) buildTextJob() else buildFullJob()
                     log("Sending ${data.size} bytes...")
                     if (writeAll(conn, target.out, data)) {
-                        log("Done sending. A page should come out in a few seconds.")
+                        log("Sent. Waiting for the printer to finish reading the job...")
+                        waitUntilPrinterCaughtUp(conn, target)
+                        log("Done. A page should be coming out now.")
                     }
                 }
             } finally {
@@ -265,16 +305,7 @@ class MainActivity : Activity() {
 
     /** Ask the printer for its name using PJL and read the answer from the IN endpoint. */
     private fun askPrinter(conn: UsbDeviceConnection, target: Target) {
-        var inEp: UsbEndpoint? = null
-        for (e in 0 until target.iface.endpointCount) {
-            val ep = target.iface.getEndpoint(e)
-            if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK &&
-                ep.direction == UsbConstants.USB_DIR_IN
-            ) {
-                inEp = ep
-            }
-        }
-        val inEndpoint = inEp ?: run {
+        val inEndpoint = findInEndpoint(target.iface) ?: run {
             log("This USB mode is one-way, so the printer cannot answer. Tap 'Switch USB mode' until it says protocol 2.")
             return
         }
