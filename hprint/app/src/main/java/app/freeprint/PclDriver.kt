@@ -9,30 +9,48 @@ import java.io.ByteArrayOutputStream
  */
 object PclDriver {
 
-    val JOB_HEADER: ByteArray =
-        "\u001B%-12345X@PJL\r\n@PJL ENTER LANGUAGE=PCL\r\n\u001BE\u001B&u300D"
-            .toByteArray(Charsets.ISO_8859_1)
-    val JOB_FOOTER: ByteArray =
-        "\u001BE\u001B%-12345X".toByteArray(Charsets.ISO_8859_1)
+    // ------------------------------------------------------------------ paper sizes
+
+    /** Paper size as dots at 300 dpi, with the PCL page-size command code. */
+    data class PaperSize(val name: String, val widthDots: Int, val heightDots: Int, val pclCode: Int)
+
+    val PAPER_SIZES = listOf(
+        PaperSize("A4",     2376, 3400, 26),   // 210 × 297 mm
+        PaperSize("Letter", 2550, 3300,  2),   // 8.5 × 11 in
+        PaperSize("Legal",  2550, 4200,  3),   // 8.5 × 14 in
+        PaperSize("A5",     1684, 2384, 100)   // 148 × 210 mm  (PCL code 100 = A5)
+    )
+
+    // ------------------------------------------------------------------ image alignment
+
+    enum class Align { TOP_LEFT, TOP_CENTER, TOP_RIGHT,
+                       CENTER_LEFT, CENTER, CENTER_RIGHT,
+                       BOTTOM_LEFT, BOTTOM_CENTER, BOTTOM_RIGHT }
+
+    // ------------------------------------------------------------------ PJL constants
+
+    val JOB_FOOTER: ByteArray = "\u001BE\u001B%-12345X".toByteArray(Charsets.ISO_8859_1)
+
     val PJL_INFO_ID: ByteArray =
         "\u001B%-12345X@PJL INFO ID\r\n\u001B%-12345X".toByteArray(Charsets.ISO_8859_1)
 
+    /** Build the PJL/PCL job header for the given paper size. */
+    fun jobHeader(paper: PaperSize): ByteArray =
+        ("\u001B%-12345X@PJL\r\n@PJL ENTER LANGUAGE=PCL\r\n" +
+         "\u001BE"            +   // reset
+         "\u001B&l${paper.pclCode}A" +   // paper size
+         "\u001B&u300D")          // unit = 1/300 inch
+            .toByteArray(Charsets.ISO_8859_1)
+
+    // ------------------------------------------------------------------ bitmapToPage
+
     /**
      * Render one Bitmap as a PCL raster page (no PJL envelope — caller adds that).
+     * The bitmap canvas should already be exactly paper.widthDots × paper.heightDots
+     * (or smaller; the PCL cursor is placed at 0,0 and the page eject comes at the end).
      *
-     * dither = false  →  "Document mode": good for screenshots and text images.
-     *   Uses a local adaptive threshold: for every pixel we look at the surrounding
-     *   area to decide what counts as "dark enough to print". This survives the
-     *   blurring that happens when Android scales a tall screenshot down to A4 width,
-     *   because a blurred dark letter is still darker than its blurred background.
-     *   No white-clamping: we trust the adaptive threshold to handle backgrounds.
-     *
-     * dither = true   →  "Photo mode": good for real photographs with smooth gradients.
-     *   Uses Floyd-Steinberg error diffusion for natural-looking halftones.
-     *   White pixels (lum > 0.95) are forced pure white to keep plain backgrounds clean.
-     *
-     * @param bitmap   Recycled by this function when it is done with it.
-     * @param dither   false = document/text, true = photo.
+     * @param bitmap   Recycled by this function.
+     * @param dither   false = document/text (adaptive threshold), true = photo (Floyd-Steinberg).
      */
     fun bitmapToPage(bitmap: Bitmap, dither: Boolean): ByteArray {
         val bw = bitmap.width
@@ -46,7 +64,7 @@ object PclDriver {
         pcl("\u001B*r1A")
         pcl("\u001B*b0M")
 
-        // Build the full luminance map (0.0 = black, 1.0 = white).
+        // Build full float luminance map (0.0 = black, 1.0 = white).
         val lum = Array(bh) { y ->
             val px = IntArray(bw)
             bitmap.getPixels(px, 0, bw, 0, y, bw, 1)
@@ -63,14 +81,12 @@ object PclDriver {
         val rowHdr = "\u001B*b${bytesPerRow}W".toByteArray(Charsets.ISO_8859_1)
 
         if (!dither) {
-            // ---- Document mode: local adaptive threshold (Sauvola-lite) ----
-            // For each pixel, the threshold = mean of neighbours × 0.85.
-            // A pixel is black if its luminance is well below the local average.
-            // This handles both "white background with black text" and
-            // "light-grey background with dark-grey text" correctly.
-            // Radius 8 gives a 17×17 neighbourhood at 300 dpi ≈ 1.5 mm.
-            val R = 8
-            // Build an integral image for fast box-mean computation.
+            // Document mode: local adaptive threshold (Sauvola-lite).
+            // For each pixel, threshold = localMean × 0.85.
+            // A pixel is black if its luminance is below the local average minus slack.
+            // This handles blurred text (from downscaling) and grey backgrounds correctly.
+            val R = 8   // 17×17 neighbourhood ≈ 1.4 mm at 300 dpi
+            // Integral image for O(1) box-mean queries.
             val integral = Array(bh + 1) { LongArray(bw + 1) }
             for (y in 0 until bh)
                 for (x in 0 until bw)
@@ -86,8 +102,6 @@ object PclDriver {
                     val sum = integral[y2][x2] - integral[y1][x2] -
                               integral[y2][x1] + integral[y1][x1]
                     val mean = sum.toFloat() / (area * 65535f)
-                    // Print the pixel if it is darker than 85% of the local mean.
-                    // The 0.15 slack stops noise in flat areas from printing as dots.
                     if (lum[y][x] < mean * 0.85f - 0.01f) {
                         val idx = x shr 3
                         row[idx] = (row[idx].toInt() or (0x80 ushr (x and 7))).toByte()
@@ -97,8 +111,8 @@ object PclDriver {
                 out.write(row)
             }
         } else {
-            // ---- Photo mode: Floyd-Steinberg error diffusion ----
-            // Clamp near-white to pure white first so plain backgrounds don't speckle.
+            // Photo mode: Floyd-Steinberg error diffusion.
+            // Near-white pixels forced to pure white so blank backgrounds don't speckle.
             for (y in 0 until bh)
                 for (x in 0 until bw)
                     if (lum[y][x] > 0.95f) lum[y][x] = 1f
@@ -133,13 +147,14 @@ object PclDriver {
         return out.toByteArray()
     }
 
+    // ------------------------------------------------------------------ test jobs
+
     fun textTestJob(): ByteArray {
         val out = ByteArrayOutputStream()
         fun pcl(s: String) = out.write(s.toByteArray(Charsets.ISO_8859_1))
         pcl("\u001B%-12345X@PJL\r\n@PJL ENTER LANGUAGE=PCL\r\n")
         pcl("\u001BE\u001B&k2G")
-        pcl("hprint text test\n")
-        pcl("HP LaserJet 1320 over USB OTG\n")
+        pcl("hprint text test\nHP LaserJet 1320 over USB OTG\n")
         pcl("If you can read this, the phone-to-printer link works.\n")
         pcl("\u000C\u001BE\u001B%-12345X")
         return out.toByteArray()
