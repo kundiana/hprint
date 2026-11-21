@@ -1,41 +1,52 @@
-# hprint, step 1: does the phone talk to the printer?
+# HPrint
 
-This is a tiny test app. It finds your HP P1102 over the OTG cable and sends
-it **one ready-made test page**. If a page comes out, the hardest part works
-and we build the rest (printing your real PDFs and photos) on top of it.
+An unofficial, bare-bones, free Android app that prints PDFs and images to older HP printers (like the LaserJet 1300 and P1102 series) over a USB OTG cable. 
 
-Nothing here costs money. No ads, no page limits.
+No ads. No page limits. No accounts. No cloud. Just plug it in and print.
 
-## Get the app onto your phone (free, no Android Studio)
+*Disclaimer: This is an unofficial, community-built app. It is not affiliated with, endorsed by, or supported by HP.*
 
-GitHub builds the APK for you in the cloud.
+## The Story
+HP dropped official driver support for these older "winprinters" (host-based PCL printers) on modern operating systems. If you have one of these reliable workhorses lying around, you were out of luck... until now. 
 
-1. Make a free account at github.com.
-2. Create a new **public** repository (any name).
-3. Put every file from this folder in it, keeping the same folders.
-   - On a computer: "Add file" -> "Upload files", drag the whole folder in.
-   - On a phone browser: switch Chrome to "Desktop site", then use
-     "Add file" -> "Create new file" for each file. In the name box, typing
-     `app/src/main/java/app/freeprint/MainActivity.kt` creates the folders.
-     `app/src/main/assets/testpage.zjs` is a binary file, so it needs the
-     "Upload files" button instead.
-   - The file `.github/workflows/build.yml` must be in exactly that place.
-4. Open the **Actions** tab, then "Build APK". It takes about 5 minutes.
-   Open the finished run and download **hprint-apk**. Unzip it.
-5. Install the `.apk` on your phone (allow "install unknown apps" when asked).
+HPrint talks directly to the printer's USB interface, converts your document to a 300 DPI raster image, and sends it using the PCL protocol the printer understands.
 
-If the build shows a red error, tap it, copy the red text, and send it to me.
-I wrote this without being able to compile it here, so a first-build error is
-possible and normal.
+## Supported Printers
+- ✅ **HP LaserJet 1302** (Tested and verified by the developer)
+- ❓ **HP LaserJet P1102** (Uses the same protocol, untested)
+- ❓ Other older HP PCL-compatible printers (Untested)
 
-## Test it
+If you test a printer, please open a GitHub Issue with your printer model and the result!
 
-1. Plug the printer into the phone with the OTG cable. Switch the printer on.
-   Put paper in.
-2. Open **hprint**, tap **1. Find printer**.
-3. Tap **2. Print test page** and press OK on the Android pop-up.
-4. A test page (text and a circle inside a square) should print.
+## How to use
+1. Connect your printer to your phone using a USB OTG cable.
+2. Turn the printer on.
+3. Open HPrint. (You can also "Share" a PDF or image from any app directly to HPrint).
+4. Allow the USB permission prompt if it appears.
+5. Select your File, choose your Paper Size and Alignment, and tap **Print**.
 
-Whatever happens, take a screenshot of the text on screen and send it to me.
-It lists exactly how your printer shows up over USB, which is what I need for
-the next step.
+*Note: Laser printers take 10–15 seconds to warm up (the fuser heating up) before the first page prints. This is normal. Please wait for the "Done." message in the app log.*
+
+## Features
+- Print standard PDFs (text-based).
+- Print photos and screenshots (uses an adaptive threshold algorithm to keep text crisp and readable).
+- Choose your paper size (A4, A5, Letter, Legal).
+- Align images (Top-Left, Center, Bottom-Right, etc.).
+- Treat scanned PDFs as images for better contrast.
+
+## How to get the app (no Android Studio needed)
+GitHub builds the APK for you in the cloud. 
+1. Go to the **Releases** tab on the right side of this page.
+2. Download the latest `hprint.apk` file.
+3. Install it on your phone (allow "install unknown apps" when asked).
+
+## How to build it yourself
+If you want to fork the project and make changes:
+1. Fork this repository.
+2. Make your changes (the main UI is in `MainActivity.kt`, the printer protocol is in `PclDriver.kt`).
+3. Go to the **Actions** tab. GitHub will automatically build a new APK for you.
+4. Download the `hprint-apk` artifact to test your changes.
+
+## Contributing
+Found a bug? Have a printer that works? Open an issue! Pull requests are welcome. 
+If you want to add support for a new printer, you only need to write a new driver class and add it to the registry.
