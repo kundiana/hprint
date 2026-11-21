@@ -44,8 +44,11 @@ GitHub builds the APK for you in the cloud.
 If you want to fork the project and make changes:
 1. Fork this repository.
 2. Make your changes (the main UI is in `MainActivity.kt`, the printer protocol is in `PclDriver.kt`).
-3. Go to the **Actions** tab. GitHub will automatically build a new APK for you.
-4. Download the `hprint-apk` artifact to test your changes.
+
+## License
+This project is licensed under the GNU General Public License v2.0 or later (GPL-2.0-or-later). See the `LICENSE` file for details.
+4. Go to the **Actions** tab. GitHub will automatically build a new APK for you.
+5. Download the `hprint-apk` artifact to test your changes.
 
 ## Contributing
 Found a bug? Have a printer that works? Open an issue! Pull requests are welcome. 
