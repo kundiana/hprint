@@ -1104,7 +1104,7 @@ class MainActivity : Activity() {
             val conn = openClaimed(target)
             try {
                 val driver = resolveDriverFor(conn, target)
-                val payload = if (graphics) driver.graphicsTestJob() else driver.textTestJob()
+                val payload = (if (graphics) driver.graphicsTestJob() else driver.textTestJob())
                     ?: throw IOException("${driver.displayName} does not provide a $label.")
                 writeBytes(conn, target.out, payload)
                 log("$label sent (${payload.size} bytes) via ${driver.displayName}.")
