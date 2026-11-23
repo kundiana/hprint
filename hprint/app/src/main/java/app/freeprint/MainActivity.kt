@@ -295,7 +295,6 @@ class MainActivity : Activity() {
         busy = active
         runOnUiThread {
             printButton.isEnabled = !active
-            printButton.alpha = if (active) 0.5f else 1.0f
         }
     }
 
@@ -337,7 +336,7 @@ class MainActivity : Activity() {
             setPadding(0, 20, 0, 8)
         }
         val alignGroup = RadioGroup(this).apply {
-            PclDriver.Align.entries.forEachIndexed { index, align ->
+            PclDriver.Align.values().forEachIndexed { index, align ->
                 addView(RadioButton(this@MainActivity).apply {
                     id = index
                     text = align.label
@@ -369,8 +368,8 @@ class MainActivity : Activity() {
                     selectedPaper = PclDriver.PAPER_SIZES[pIdx]
                 }
                 val aIdx = alignGroup.checkedRadioButtonId
-                if (aIdx in PclDriver.Align.entries.indices) {
-                    selectedAlign = PclDriver.Align.entries[aIdx]
+                if (aIdx in PclDriver.Align.values().indices) {
+                    selectedAlign = PclDriver.Align.values()[aIdx]
                 }
                 photoMode = photoCheck.isChecked
                 updateSettingsSummary()
@@ -428,7 +427,7 @@ class MainActivity : Activity() {
             Copyright (C) 2026 kundiana
 
             License: GNU General Public License v2 or later (GPL-2.0-or-later).
-            Contact / Project: https://github.com/fuoes/M1005-OTG (reference architecture)
+            Contact / Project: https://github.com/kundiana/hprint
 
             Disclaimer: Provided "AS IS" without warranty of any kind. Test on spare paper first; verify printer compatibility and spool behavior before unattended jobs.
         """.trimIndent()
