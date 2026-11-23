@@ -85,13 +85,15 @@ class MainActivity : Activity() {
         private const val REQ_OPEN_FILE = 42
         private const val REQ_SAVE_LOG = 43
 
-        private const val COLOR_BG = 0xFFF4F6F6.toInt()
-        private const val COLOR_CARD = 0xFFFFFFFF.toInt()
-        private const val COLOR_PRIMARY = 0xFF007D68.toInt()
-        private const val COLOR_TEXT_DARK = 0xFF172B28.toInt()
-        private const val COLOR_TEXT_MUTED = 0xFF4A5D59.toInt()
-        private const val COLOR_WARN = 0xFF8B5B14.toInt()
-        private const val COLOR_DIVIDER = 0xFFDCE2E1.toInt()
+        
+        private const val COLOR_BG = 0xFFF3F6FA.toInt()         // Cool light surface
+        private const val COLOR_CARD = 0xFFFFFFFF.toInt()       // Pure white preview card
+        private const val COLOR_PRIMARY = 0xFF007DBA.toInt()    // Classic Blue
+        private const val COLOR_TEXT_DARK = 0xFF0F2537.toInt()  // Deep navy-slate
+        private const val COLOR_TEXT_MUTED = 0xFF4A6278.toInt() // Muted slate
+        private const val COLOR_WARN = 0xFFB45309.toInt()       // Clear amber warning
+        private const val COLOR_DIVIDER = 0xFFD8E1EA.toInt()    // Subtle cool border
+        
     }
 
     private lateinit var usb: UsbManager
