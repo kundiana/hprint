@@ -1,21 +1,3 @@
-/*
- * HPrint - An unofficial Android print app for older HP printers.
- * Copyright (C) 2026 kundiana
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package app.freeprint
 
 import android.app.Activity
@@ -27,7 +9,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
@@ -51,6 +32,7 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -76,7 +58,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * hprint — Direct USB OTG PCL 5e printing for HP LaserJet printers.
+ * hprint — Direct USB OTG printing for legacy HP printers.
  */
 class MainActivity : Activity() {
 
@@ -85,15 +67,13 @@ class MainActivity : Activity() {
         private const val REQ_OPEN_FILE = 42
         private const val REQ_SAVE_LOG = 43
 
-        
-        private const val COLOR_BG = 0xFFF3F6FA.toInt()         // Cool light surface
-        private const val COLOR_CARD = 0xFFFFFFFF.toInt()       // Pure white preview card
-        private const val COLOR_PRIMARY = 0xFF007DBA.toInt()    // Classic Blue
-        private const val COLOR_TEXT_DARK = 0xFF0F2537.toInt()  // Deep navy-slate
-        private const val COLOR_TEXT_MUTED = 0xFF4A6278.toInt() // Muted slate
-        private const val COLOR_WARN = 0xFFB45309.toInt()       // Clear amber warning
-        private const val COLOR_DIVIDER = 0xFFD8E1EA.toInt()    // Subtle cool border
-        
+        private const val COLOR_BG = 0xFFF3F6FA.toInt()
+        private const val COLOR_CARD = 0xFFFFFFFF.toInt()
+        private const val COLOR_PRIMARY = 0xFF007DBA.toInt()
+        private const val COLOR_TEXT_DARK = 0xFF0F2537.toInt()
+        private const val COLOR_TEXT_MUTED = 0xFF4A6278.toInt()
+        private const val COLOR_WARN = 0xFFB45309.toInt()
+        private const val COLOR_DIVIDER = 0xFFD8E1EA.toInt()
     }
 
     private lateinit var usb: UsbManager
@@ -103,6 +83,7 @@ class MainActivity : Activity() {
 
     // UI references
     private lateinit var deviceText: TextView
+    private lateinit var driverText: TextView
     private lateinit var connectButton: Button
     private lateinit var selectButton: Button
     private lateinit var fileText: TextView
@@ -123,7 +104,7 @@ class MainActivity : Activity() {
 
     // State
     @Volatile private var busy = false
-    private var preferredProtocol = 2 // 2 = bidirectional, 1 = unidirectional, 3 = vendor/special
+    private var preferredProtocol = 2
     private var pendingAfterPermission: (() -> Unit)? = null
 
     private var activeFile: File? = null
@@ -132,10 +113,10 @@ class MainActivity : Activity() {
     private var documentName = "No file selected"
     private var previewBitmap: Bitmap? = null
 
-    private var selectedPaper = PclDriver.PAPER_SIZES[0]
-    private var selectedMode = PclDriver.PrintMode.DOCUMENT
-    private var selectedOrientation = PclDriver.Orientation.AUTO
-    private var selectedAlign = PclDriver.Align.CENTER
+    private var selectedPaper = PrintPapers.ALL[0]
+    private var selectedMode = PrintMode.DOCUMENT
+    private var selectedOrientation = Orientation.AUTO
+    private var selectedAlign = Align.CENTER
 
     private val logBuffer = StringBuilder()
 
@@ -160,9 +141,14 @@ class MainActivity : Activity() {
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                     refreshDeviceLabel()
                     log("USB printer attached.")
+                    val target = findTarget()
+                    if (target != null && usb.hasPermission(target.device) && !busy) {
+                        inspectPrinter()
+                    }
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     refreshDeviceLabel()
+                    setDriverLabel("Driver: auto-detected when printer connects")
                     log("USB printer disconnected.")
                 }
             }
@@ -174,9 +160,12 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         actionBar?.hide()
+        @Suppress("DEPRECATION")
+        window.statusBarColor = COLOR_BG
         usb = getSystemService(Context.USB_SERVICE) as UsbManager
 
         buildUi()
+        applyLightStatusBar()
 
         val filter = IntentFilter(ACTION_USB_PERMISSION).apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
@@ -210,7 +199,21 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    // ------------------------------------------------------------------ UI Builder (M1005-OTG Layout)
+    private fun applyLightStatusBar() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.decorView.post {
+                window.insetsController?.setSystemBarsAppearance(
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                )
+            }
+        } else if (Build.VERSION.SDK_INT >= 23) {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        }
+    }
+
+    // ------------------------------------------------------------------ UI Builder
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
@@ -249,15 +252,25 @@ class MainActivity : Activity() {
                 contentDescription = "Printer diagnostics"
                 setOnClickListener { showDiagnosticsDialog() }
             }
+            val aboutBtn = ImageButton(this@MainActivity).apply {
+                setImageResource(android.R.drawable.ic_menu_info_details)
+                setBackgroundColor(Color.TRANSPARENT)
+                contentDescription = "About hprint"
+                setOnClickListener { showAboutDialog() }
+            }
             addView(diagBtn, LinearLayout.LayoutParams(dp(48), dp(48)))
+            addView(aboutBtn, LinearLayout.LayoutParams(dp(48), dp(48)))
         }
         content.addView(header)
-        content.addView(label("Wired USB OTG · PCL 5e", 14f, COLOR_TEXT_MUTED))
+        content.addView(label("Direct USB OTG Printing", 14f, COLOR_TEXT_MUTED))
 
-        // Printer status + Connect button
+        // Printer status + Driver badge + Connect button
         deviceText = label("No USB printer detected", 15f, COLOR_WARN)
+        driverText = label("Driver: auto-detected when printer connects", 13f, COLOR_TEXT_MUTED)
         content.addView(deviceText)
-        connectButton = makeButton("Connect / Check Printer").apply {
+        content.addView(driverText)
+
+        connectButton = makeButton("Connect / Detect Printer").apply {
             setOnClickListener { connectOrInspect() }
         }
         content.addView(connectButton, fullWidth())
@@ -335,10 +348,10 @@ class MainActivity : Activity() {
                     adapter = ArrayAdapter(
                         this@MainActivity,
                         android.R.layout.simple_spinner_dropdown_item,
-                        PclDriver.PAPER_SIZES.map { it.name }
+                        PrintPapers.ALL.map { it.name }
                     )
                     onItemSelectedListener = onSelect { pos ->
-                        selectedPaper = PclDriver.PAPER_SIZES[pos]
+                        selectedPaper = PrintPapers.ALL[pos]
                         refreshPreview()
                     }
                 }
@@ -351,10 +364,10 @@ class MainActivity : Activity() {
                     adapter = ArrayAdapter(
                         this@MainActivity,
                         android.R.layout.simple_spinner_dropdown_item,
-                        PclDriver.PrintMode.values().map { it.label }
+                        PrintMode.values().map { it.label }
                     )
                     onItemSelectedListener = onSelect { pos ->
-                        selectedMode = PclDriver.PrintMode.values()[pos]
+                        selectedMode = PrintMode.values()[pos]
                     }
                 }
                 addView(modeSpinner)
@@ -364,7 +377,7 @@ class MainActivity : Activity() {
         }
         content.addView(paperModeRow)
 
-        // Picture Orientation + Alignment Row (visible only when an image is loaded)
+        // Picture Orientation + Alignment Row
         pictureOptionsRow = hRow().apply {
             visibility = View.GONE
             val orientCol = LinearLayout(this@MainActivity).apply {
@@ -374,10 +387,10 @@ class MainActivity : Activity() {
                     adapter = ArrayAdapter(
                         this@MainActivity,
                         android.R.layout.simple_spinner_dropdown_item,
-                        PclDriver.Orientation.values().map { it.label }
+                        Orientation.values().map { it.label }
                     )
                     onItemSelectedListener = onSelect { pos ->
-                        selectedOrientation = PclDriver.Orientation.values()[pos]
+                        selectedOrientation = Orientation.values()[pos]
                         refreshPreview()
                     }
                 }
@@ -390,11 +403,11 @@ class MainActivity : Activity() {
                     adapter = ArrayAdapter(
                         this@MainActivity,
                         android.R.layout.simple_spinner_dropdown_item,
-                        PclDriver.Align.values().map { it.label }
+                        Align.values().map { it.label }
                     )
-                    setSelection(PclDriver.Align.CENTER.ordinal)
+                    setSelection(Align.CENTER.ordinal)
                     onItemSelectedListener = onSelect { pos ->
-                        selectedAlign = PclDriver.Align.values()[pos]
+                        selectedAlign = Align.values()[pos]
                         refreshPreview()
                     }
                 }
@@ -405,7 +418,7 @@ class MainActivity : Activity() {
         }
         content.addView(pictureOptionsRow)
 
-        // Primary Print CTA + Secondary Test / Cancel
+        // Primary Print CTA + Test / Cancel
         printButton = makeButton("Print Document").apply {
             setTextColor(Color.WHITE)
             backgroundTintList = ColorStateList.valueOf(COLOR_PRIMARY)
@@ -431,6 +444,8 @@ class MainActivity : Activity() {
 
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             isIndeterminate = true
+            progressTintList = ColorStateList.valueOf(COLOR_PRIMARY)
+            indeterminateTintList = ColorStateList.valueOf(COLOR_PRIMARY)
             visibility = View.GONE
         }
         content.addView(progressBar, fullWidth().apply { setMargins(0, dp(8), 0, dp(2)) })
@@ -509,16 +524,9 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setProgress(percent: Int?) {
+    private fun setDriverLabel(msg: String) {
         runOnUiThread {
-            if (isDestroyed) return@runOnUiThread
-            if (percent == null) {
-                progressBar.isIndeterminate = true
-            } else {
-                progressBar.isIndeterminate = false
-                progressBar.max = 100
-                progressBar.progress = percent.coerceIn(0, 100)
-            }
+            if (!isDestroyed) driverText.text = msg
         }
     }
 
@@ -548,7 +556,6 @@ class MainActivity : Activity() {
         if (busy) return
         busy = true
         cancelFlag.set(false)
-        setProgress(null)
         updateButtons()
         worker.execute {
             try {
@@ -664,7 +671,7 @@ class MainActivity : Activity() {
                         pfd?.close()
                     }
                 } else {
-                    val bmp = PclDriver.decodeImageWithExif(imported, 512, PclDriver.Orientation.PORTRAIT)
+                    val bmp = RasterEngine.decodeImageWithExif(imported, 512, Orientation.PORTRAIT)
                     bmp.recycle()
                 }
 
@@ -686,9 +693,9 @@ class MainActivity : Activity() {
                 val c = page.canvas
                 val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
                 p.textSize = 28f; p.typeface = Typeface.DEFAULT_BOLD
-                c.drawText("hprint · PCL 5e", 45f, 85f, p)
+                c.drawText("hprint · Test Page", 45f, 85f, p)
                 p.textSize = 14f; p.typeface = Typeface.DEFAULT
-                c.drawText("300 DPI PackBits · Android ${Build.VERSION.RELEASE} / ${Build.MODEL}", 45f, 118f, p)
+                c.drawText("300 DPI · Android ${Build.VERSION.RELEASE} / ${Build.MODEL}", 45f, 118f, p)
                 p.style = Paint.Style.STROKE; p.strokeWidth = 1.5f
                 c.drawRect(45f, 150f, 550f, 750f, p)
                 for (i in 0 until 10) {
@@ -709,7 +716,7 @@ class MainActivity : Activity() {
     }
 
     private fun setLoadedDocument(file: File, pdf: Boolean, count: Int, name: String) {
-        val preview = PclDriver.renderPreview(
+        val preview = RasterEngine.renderPreview(
             file, pdf, 0, selectedPaper, selectedAlign, selectedOrientation
         )
         runOnUiThread {
@@ -734,10 +741,8 @@ class MainActivity : Activity() {
             copiesInput.setText("1")
             fileText.text = if (pdf) "$name  ·  $count page(s)" else "$name  ·  Image"
             pictureOptionsRow.visibility = if (pdf) View.GONE else View.VISIBLE
-            modeSpinner.setSelection(
-                if (pdf) PclDriver.PrintMode.DOCUMENT.ordinal else PclDriver.PrintMode.PHOTO.ordinal
-            )
-            selectedMode = if (pdf) PclDriver.PrintMode.DOCUMENT else PclDriver.PrintMode.PHOTO
+            modeSpinner.setSelection(if (pdf) PrintMode.DOCUMENT.ordinal else PrintMode.PHOTO.ordinal)
+            selectedMode = if (pdf) PrintMode.DOCUMENT else PrintMode.PHOTO
             setStage("Ready to print")
             log("Loaded $name (${if (pdf) "$count pages" else "image"}). Mode: ${selectedMode.label}")
             updateButtons()
@@ -752,7 +757,7 @@ class MainActivity : Activity() {
         val orient = selectedOrientation
         previewWorker.execute {
             try {
-                val bmp = PclDriver.renderPreview(file, pdf, 0, paper, align, orient)
+                val bmp = RasterEngine.renderPreview(file, pdf, 0, paper, align, orient)
                 runOnUiThread {
                     if (isDestroyed) {
                         bmp.recycle()
@@ -767,7 +772,7 @@ class MainActivity : Activity() {
         }
     }
 
-    // ------------------------------------------------------------------ USB Helpers
+    // ------------------------------------------------------------------ USB & Driver Resolution
 
     private class Target(val device: UsbDevice, val iface: UsbInterface, val out: UsbEndpoint)
 
@@ -795,14 +800,6 @@ class MainActivity : Activity() {
         }
         return best
     }
-
-    private fun findInEndpoint(iface: UsbInterface): UsbEndpoint? =
-        (0 until iface.endpointCount)
-            .map { iface.getEndpoint(it) }
-            .firstOrNull {
-                it.type == UsbConstants.USB_ENDPOINT_XFER_BULK &&
-                    it.direction == UsbConstants.USB_DIR_IN
-            }
 
     private fun refreshDeviceLabel() {
         val target = findTarget()
@@ -873,30 +870,53 @@ class MainActivity : Activity() {
         return conn
     }
 
+    private fun resolveDriverFor(conn: UsbDeviceConnection, target: Target): PrinterDriver {
+        val identity = UsbProbe.readDeviceId(conn, target.iface)
+        val status = UsbProbe.readPortStatus(conn, target.iface)
+        val resolution = DriverRegistry.resolve(target.device, identity)
+
+        val title = identity.displayTitle(target.device)
+        if (!identity.isEmpty) {
+            log("IEEE 1284: ${identity.raw}")
+        } else {
+            log("IEEE 1284 GET_DEVICE_ID returned empty.")
+        }
+        log("Status: ${status.summaryText()}")
+        log("Driver: ${resolution.reason}")
+
+        val driver = resolution.driver
+        if (driver == null) {
+            setDriverLabel("Unsupported: $title (${identity.commands.joinToString()})")
+            throw IOException(resolution.reason)
+        }
+        setDriverLabel("Driver: ${driver.displayName} · $title")
+
+        if (status.known && (status.paperEmpty || status.hasError)) {
+            throw IOException(status.summaryText())
+        }
+        return driver
+    }
+
     private fun inspectPrinter() {
         runTask {
-            setStage("Checking printer...")
+            setStage("Detecting printer & driver...")
             val target = findTarget() ?: throw IOException("Printer disconnected.")
             val conn = openClaimed(target)
             try {
-                val inEp = findInEndpoint(target.iface)
-                if (inEp == null) {
-                    log("Connected (one-way protocol ${target.iface.interfaceProtocol}). Ready.")
-                    setStage("Printer ready (one-way)")
-                    return@runTask
-                }
-                writeBytes(conn, target.out, PclDriver.PJL_INFO_ID)
-                val buf = ByteArray(512)
-                val sb = StringBuilder()
-                val end = SystemClock.elapsedRealtime() + 3000
-                while (SystemClock.elapsedRealtime() < end) {
-                    val n = conn.bulkTransfer(inEp, buf, buf.size, 300)
-                    if (n > 0) sb.append(String(buf, 0, n, Charsets.ISO_8859_1))
-                    else if (sb.isNotEmpty()) break
-                }
-                val id = sb.toString().replace("\r", "").trim()
-                log(if (id.isEmpty()) "Connected (no PJL reply)." else "Printer ID: $id")
-                setStage(if (id.isEmpty()) "Printer ready" else id.lines().last())
+                val identity = UsbProbe.readDeviceId(conn, target.iface)
+                val status = UsbProbe.readPortStatus(conn, target.iface)
+                val resolution = DriverRegistry.resolve(target.device, identity)
+
+                val title = identity.displayTitle(target.device)
+                if (!identity.isEmpty) log("IEEE 1284: ${identity.raw}")
+                log("Port status: ${status.summaryText()}")
+                log("Driver check: ${resolution.reason}")
+
+                val labelText = resolution.driver?.let {
+                    "Driver: ${it.displayName} · $title"
+                } ?: "Unsupported: $title"
+                setDriverLabel(labelText)
+                setStage(if (resolution.driver != null) "$title ready" else resolution.reason)
             } finally {
                 conn.releaseInterface(target.iface)
                 conn.close()
@@ -923,7 +943,7 @@ class MainActivity : Activity() {
             return
         }
         val pages = try {
-            if (isPdf) PclDriver.parsePages(pagesInput.text.toString(), pageCount) else listOf(0)
+            if (isPdf) RasterEngine.parsePages(pagesInput.text.toString(), pageCount) else listOf(0)
         } catch (e: IllegalArgumentException) {
             log(e.message ?: "Invalid page range.")
             return
@@ -938,35 +958,39 @@ class MainActivity : Activity() {
                     "${selectedPaper.name} · ${selectedMode.label}"
             )
             .setNegativeButton("Cancel", null)
-            .setPositiveButton("Print") { _, _ -> executePrint(file, pages, copies) }
+            .setPositiveButton("Print") { _, _ ->
+                val req = PrintJobRequest(
+                    file = file,
+                    isPdf = isPdf,
+                    pages = pages,
+                    copies = copies,
+                    paper = selectedPaper,
+                    align = selectedAlign,
+                    orientation = selectedOrientation,
+                    mode = selectedMode
+                )
+                executePrint(req)
+            }
             .show()
     }
 
-    private fun executePrint(file: File, pages: List<Int>, copies: Int) {
-        val pdf = isPdf
-        val paper = selectedPaper
-        val align = selectedAlign
-        val orient = selectedOrientation
-        val mode = selectedMode
-
+    private fun executePrint(request: PrintJobRequest) {
         runTask {
             val started = SystemClock.elapsedRealtime()
+            setStage("Probing printer...")
             val target = findTarget() ?: throw IOException("Printer disconnected.")
             val conn = openClaimed(target)
             try {
+                val driver = resolveDriverFor(conn, target)
                 val usbOut = UsbBulkOutputStream(conn, target.out, cancelFlag)
-                if (pdf) {
-                    PclDriver.streamPdfJob(file, pages, copies, paper, mode, usbOut, cancelFlag) { s ->
-                        setStage(s)
-                    }
+                if (request.isPdf) {
+                    driver.streamPdfJob(request, usbOut, cancelFlag) { s -> setStage(s) }
                 } else {
-                    PclDriver.streamPictureJob(file, copies, paper, align, orient, mode, usbOut, cancelFlag) { s ->
-                        setStage(s)
-                    }
+                    driver.streamPictureJob(request, usbOut, cancelFlag) { s -> setStage(s) }
                 }
                 val secs = (SystemClock.elapsedRealtime() - started) / 1000.0
                 val kb = usbOut.totalBytesSent / 1024
-                val msg = String.format(Locale.US, "Sent %d KB in %.2fs", kb, secs)
+                val msg = String.format(Locale.US, "Sent %d KB via %s in %.2fs", kb, driver.id.uppercase(Locale.US), secs)
                 log(msg)
                 setStage("Done ($msg)")
             } finally {
@@ -982,7 +1006,7 @@ class MainActivity : Activity() {
             if (cancelFlag.get()) throw InterruptedException("Cancelled.")
             val len = minOf(16384, data.size - offset)
             val n = conn.bulkTransfer(ep, data, offset, len, 10_000)
-            if (n <= 0) throw IOException("USB transfer failed (result=$n) at byte $offset/${data.size}.")
+            if (n <= 0) throw IOException("USB transfer failed (code=$n) at byte $offset/${data.size}.")
             offset += n
         }
     }
@@ -1018,13 +1042,32 @@ class MainActivity : Activity() {
         }
     }
 
-    // ------------------------------------------------------------------ Diagnostics Menu
+    // ------------------------------------------------------------------ About & Diagnostics
+
+    private fun showAboutDialog() {
+        val version = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0"
+        } catch (_: Exception) {
+            "1.0"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("hprint v$version")
+            .setMessage(
+                "Direct USB OTG printing for legacy HP printers — no PC, no Wi-Fi, no cloud.\n\n" +
+                    "• 100% offline local rendering\n" +
+                    "• Automatic IEEE 1284 protocol detection\n" +
+                    "• Active engine: HP PCL 5e (300 DPI PackBits)\n" +
+                    "• Supports PDFs & images via Share or file picker"
+            )
+            .setPositiveButton("OK", null)
+            .show()
+    }
 
     private fun showDiagnosticsDialog() {
         val options = arrayOf(
-            "Text test page (PCL)",
-            "Graphics test page (PackBits)",
-            "Ask printer ID (PJL)",
+            "Text test page (active driver)",
+            "Graphics test page (active driver)",
+            "Probe IEEE 1284 Device ID & status",
             "Cycle USB protocol (currently $preferredProtocol)",
             "List raw USB devices"
         )
@@ -1032,8 +1075,8 @@ class MainActivity : Activity() {
             .setTitle("Printer Diagnostics")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> sendRawDiagnostic(PclDriver.textTestJob(), "Text test")
-                    1 -> sendRawDiagnostic(PclDriver.graphicsTestJob(), "Graphics test")
+                    0 -> sendDriverTest(graphics = false)
+                    1 -> sendDriverTest(graphics = true)
                     2 -> connectOrInspect()
                     3 -> {
                         preferredProtocol = when (preferredProtocol) { 2 -> 1; 1 -> 3; else -> 2 }
@@ -1046,21 +1089,25 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun sendRawDiagnostic(data: ByteArray, label: String) {
+    private fun sendDriverTest(graphics: Boolean) {
         val target = findTarget() ?: run {
             log("Printer not found.")
             return
         }
         if (!usb.hasPermission(target.device)) {
-            requestUsbPermission(target.device) { sendRawDiagnostic(data, label) }
+            requestUsbPermission(target.device) { sendDriverTest(graphics) }
             return
         }
         runTask {
+            val label = if (graphics) "Graphics test" else "Text test"
             setStage("Sending $label...")
             val conn = openClaimed(target)
             try {
-                writeBytes(conn, target.out, data)
-                log("$label sent (${data.size} bytes).")
+                val driver = resolveDriverFor(conn, target)
+                val payload = if (graphics) driver.graphicsTestJob() else driver.textTestJob()
+                    ?: throw IOException("${driver.displayName} does not provide a $label.")
+                writeBytes(conn, target.out, payload)
+                log("$label sent (${payload.size} bytes) via ${driver.displayName}.")
                 setStage("$label sent")
             } finally {
                 conn.releaseInterface(target.iface)
