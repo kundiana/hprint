@@ -6,14 +6,6 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 2 of the License, or
  * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package app.freeprint
@@ -148,12 +140,10 @@ class MainActivity : Activity() {
         }
         val diagButton = Button(this).apply {
             text = "Diagnostics"
-            textAllCaps = false
             setOnClickListener { showDiagnosticsDialog() }
         }
         val aboutButton = Button(this).apply {
             text = "About"
-            textAllCaps = false
             setOnClickListener { showAboutDialog() }
         }
         topBar.addView(titleView)
@@ -174,7 +164,6 @@ class MainActivity : Activity() {
         }
         val chooseButton = Button(this).apply {
             text = "Choose File"
-            textAllCaps = false
             setOnClickListener { pickFile() }
         }
         statusRow.addView(statusView)
@@ -306,7 +295,6 @@ class MainActivity : Activity() {
         busy = active
         runOnUiThread {
             printButton.isEnabled = !active
-            printButton.text = if (active) "Working..." else "Print"
         }
     }
 
@@ -435,11 +423,11 @@ class MainActivity : Activity() {
 
     private fun showAboutDialog() {
         val message = """
-            HPrint — Unofficial USB OTG Print App
+            HPrint — Unofficial USB OTG PCL Print App
             Copyright (C) 2026 kundiana
 
             License: GNU General Public License v2 or later (GPL-2.0-or-later).
-            Contact / Project: https://github.com/kundiana/hprint
+            Contact / Project: https://github.com/fuoes/M1005-OTG (reference architecture)
 
             Disclaimer: Provided "AS IS" without warranty of any kind. Test on spare paper first; verify printer compatibility and spool behavior before unattended jobs.
         """.trimIndent()
@@ -683,10 +671,6 @@ class MainActivity : Activity() {
         beginRenderAndPrint()
     }
 
-    /**
-     * Phase 1: Render & PCL-encode the entire job into a spool file on disk WITHOUT holding USB open.
-     * Phase 2: Open USB, blast 4 KB chunks from the spool file, and close immediately.
-     */
     private fun beginRenderAndPrint() {
         val paper = selectedPaper
         val align = selectedAlign
@@ -716,7 +700,6 @@ class MainActivity : Activity() {
                 val renderMs = (System.nanoTime() - t0) / 1_000_000
                 log("Spooled $renderedPages page(s) (${spoolFile.length()} bytes) in ${renderMs} ms.")
 
-                // Now open USB and blast 4 KB chunks with zero sleeps.
                 val target = findTarget() ?: run {
                     log("Printer disconnected before USB transfer.")
                     refreshUsbStatus()
@@ -930,7 +913,6 @@ class MainActivity : Activity() {
             bmp = rotated
         }
 
-        // Fit strictly inside (pw, ph) preserving aspect ratio — never stretches past bounds.
         val scale = minOf(pw.toFloat() / bmp.width, ph.toFloat() / bmp.height)
         val imgW = (bmp.width * scale).roundToInt().coerceIn(1, pw)
         val imgH = (bmp.height * scale).roundToInt().coerceIn(1, ph)
