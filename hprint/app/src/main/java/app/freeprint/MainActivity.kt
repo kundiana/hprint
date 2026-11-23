@@ -295,6 +295,7 @@ class MainActivity : Activity() {
         busy = active
         runOnUiThread {
             printButton.isEnabled = !active
+            printButton.alpha = if (active) 0.5f else 1.0f
         }
     }
 
