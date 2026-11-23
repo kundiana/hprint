@@ -126,7 +126,6 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.parseColor("#F5F6F8"))
         }
 
-        // 1. Top Bar: "HPrint" on left, "Diagnostics" and "About" on right
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -150,7 +149,6 @@ class MainActivity : Activity() {
         topBar.addView(diagButton)
         topBar.addView(aboutButton)
 
-        // 2. Status line + file picker trigger
         val statusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -169,7 +167,6 @@ class MainActivity : Activity() {
         statusRow.addView(statusView)
         statusRow.addView(chooseButton)
 
-        // 3. Large white bordered preview box in the middle
         val previewContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -202,7 +199,6 @@ class MainActivity : Activity() {
         previewContainer.addView(previewImage)
         previewContainer.addView(previewHint)
 
-        // Optional compact page range field (shown only when a multi-page PDF is loaded)
         pagesInput = EditText(this).apply {
             hint = "Pages (e.g. 1-3, empty = all)"
             textSize = 14f
@@ -210,7 +206,6 @@ class MainActivity : Activity() {
             setPadding(0, 12, 0, 4)
         }
 
-        // 4. Clickable settings summary line below preview
         settingsSummaryView = TextView(this).apply {
             textSize = 16f
             setTextColor(Color.parseColor("#1D4ED8"))
@@ -221,7 +216,6 @@ class MainActivity : Activity() {
             updateSettingsSummary()
         }
 
-        // 5. Massive primary Print button at the bottom
         printButton = Button(this).apply {
             text = "Print"
             textSize = 20f
@@ -306,8 +300,6 @@ class MainActivity : Activity() {
     }
 
     private fun getLogText(): String = synchronized(logBuilder) { logBuilder.toString() }
-
-    // ------------------------------------------------------------------ Dialogs
 
     private fun showSettingsDialog() {
         val container = LinearLayout(this).apply {
@@ -438,8 +430,6 @@ class MainActivity : Activity() {
             .setPositiveButton("OK", null)
             .show()
     }
-
-    // ------------------------------------------------------------------ File loading & preview
 
     @Suppress("DEPRECATION")
     private fun pickFile() {
@@ -581,8 +571,6 @@ class MainActivity : Activity() {
             }
         }
     }
-
-    // ------------------------------------------------------------------ USB discovery & transfer
 
     private data class UsbTarget(
         val device: UsbDevice,
@@ -807,8 +795,6 @@ class MainActivity : Activity() {
             conn.close()
         }
     }
-
-    // ------------------------------------------------------------------ Page & Picture rendering
 
     private fun parsePages(text: String, count: Int): List<Int> {
         val trimmed = text.trim()
