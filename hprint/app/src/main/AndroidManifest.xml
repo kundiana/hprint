@@ -3,7 +3,7 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
     <application
         android:icon="@mipmap/ic_launcher"
-        android:label="hprint"
+        android:label="hPrint"
         android:allowBackup="false"
         android:largeHeap="true"
         android:theme="@android:style/Theme.DeviceDefault.Light">
