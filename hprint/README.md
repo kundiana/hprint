@@ -1,4 +1,4 @@
-# HPrint
+# hPrint
 
 An unofficial, bare-bones, free Android app that prints PDFs and images to older HP printers (like the LaserJet 1300 and P1102 series) over a USB OTG cable. 
 
