@@ -21,7 +21,7 @@ If you test a printer, please open a GitHub Issue with your printer model and th
 ## How to use
 1. Connect your printer to your phone using a USB OTG cable.
 2. Turn the printer on.
-3. Open HPrint. (You can also "Share" a PDF or image from any app directly to HPrint).
+3. Open hPrint. (You can also "Share" a PDF or image from any app directly to hPrint).
 4. Allow the USB permission prompt if it appears.
 5. Select your File, choose your Paper Size and Alignment, and tap **Print**.
 
