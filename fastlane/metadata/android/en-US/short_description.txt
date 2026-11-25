@@ -1,0 +1,1 @@
+Print PDFs and images to older HP printers over USB OTG. No ads, no cloud.
