@@ -1,0 +1,20 @@
+hPrint lets you print PDFs and images directly to older HP LaserJet printers over a USB OTG cable — no PC, no Wi-Fi, no cloud, no account required.
+
+HP dropped driver support for many reliable older printers on modern systems. hPrint brings them back to life by talking directly to the printer's USB interface using the PCL protocol.
+
+FEATURES
+• Print PDFs and images (photos, screenshots)
+• Share directly from any app to hPrint
+• Choose paper size: A4, A5, Letter, Legal
+• Image alignment options
+• Built-in print log with export for troubleshooting
+• No ads, no tracking, no internet permission
+
+SUPPORTED PRINTERS
+Works with HP LaserJet printers that support PCL over USB, including the 1150, 1200, 1300 series and many others. If your printer reports PCL in its device ID, it will likely work.
+
+REQUIREMENTS
+• USB OTG cable
+• Android 7.0 or higher
+
+This is an open source, community-built app. Not affiliated with or endorsed by HP.
