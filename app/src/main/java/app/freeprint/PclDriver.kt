@@ -23,7 +23,16 @@ object PclDriver : PrinterDriver {
     override val displayName: String = "HP PCL 5e (300 DPI)"
     override val priority: Int = 50
 
-    val JOB_FOOTER: ByteArray = "\u001BE\u001B%-12345X".toByteArray(Charsets.ISO_8859_1)
+    private const val UEL = "\u001B%-12345X"
+
+    /**
+     * Reset, leave PCL, close the PJL job and tell the printer the job is over.
+     * The "@PJL EOJ" makes the printer answer "@PJL USTATUS JOB / END" once the last
+     * page has actually left the machine, which the app waits for before closing USB.
+     */
+    val JOB_FOOTER: ByteArray =
+        ("\u001BE" + UEL + "@PJL EOJ NAME=\"hprint\"\r\n" + UEL)
+            .toByteArray(Charsets.ISO_8859_1)
     val PJL_INFO_ID: ByteArray =
         "\u001B%-12345X@PJL INFO ID\r\n\u001B%-12345X".toByteArray(Charsets.ISO_8859_1)
 
@@ -37,10 +46,16 @@ object PclDriver : PrinterDriver {
 
     fun jobHeader(paper: PaperSize, copies: Int = 1): ByteArray {
         val copyCmd = if (copies > 1) "\u001B&l${copies}X" else ""
-        return ("\u001B%-12345X@PJL\r\n@PJL ENTER LANGUAGE=PCL\r\n" +
+        return (UEL + "@PJL\r\n" +
+            "@PJL USTATUSOFF\r\n" +
+            "@PJL USTATUS JOB=ON\r\n" +
+            "@PJL USTATUS DEVICE=ON\r\n" +
+            "@PJL JOB NAME=\"hprint\"\r\n" +
+            "@PJL ENTER LANGUAGE=PCL\r\n" +
             "\u001BE" +
             "\u001B&l${paper.pclCode}A" +
             "\u001B&l0E" +
+            "\u001B&l0L" +
             copyCmd +
             "\u001B&u300D")
             .toByteArray(Charsets.ISO_8859_1)
