@@ -595,7 +595,10 @@ class MainActivity : Activity() {
             Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 type = "text/plain"
-                putExtra(Intent.EXTRA_TITLE, "hprint-diagnostic.txt")
+                putExtra(
+                    Intent.EXTRA_TITLE,
+                    "hprint-diagnostic-" + SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date()) + ".txt"
+                )
             },
             REQ_SAVE_LOG
         )
