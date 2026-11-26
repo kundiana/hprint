@@ -774,7 +774,12 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------------ USB & Driver Resolution
 
-    private class Target(val device: UsbDevice, val iface: UsbInterface, val out: UsbEndpoint)
+    private class Target(
+        val device: UsbDevice,
+        val iface: UsbInterface,
+        val out: UsbEndpoint,
+        val inp: UsbEndpoint?
+    )
 
     private fun findTarget(): Target? {
         var best: Target? = null
@@ -786,15 +791,20 @@ class MainActivity : Activity() {
                 val score = if (itf.interfaceProtocol == preferredProtocol) 10
                 else when (itf.interfaceProtocol) { 2 -> 3; 1 -> 2; else -> 1 }
                 if (score <= bestScore) continue
+                var outEp: UsbEndpoint? = null
+                var inEp: UsbEndpoint? = null
                 for (e in 0 until itf.endpointCount) {
                     val ep = itf.getEndpoint(e)
-                    if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK &&
-                        ep.direction == UsbConstants.USB_DIR_OUT
-                    ) {
-                        best = Target(d, itf, ep)
-                        bestScore = score
-                        break
+                    if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
+                    if (ep.direction == UsbConstants.USB_DIR_OUT) {
+                        if (outEp == null) outEp = ep
+                    } else if (inEp == null) {
+                        inEp = ep
                     }
+                }
+                if (outEp != null) {
+                    best = Target(d, itf, outEp, inEp)
+                    bestScore = score
                 }
             }
         }
@@ -982,17 +992,35 @@ class MainActivity : Activity() {
             val conn = openClaimed(target)
             try {
                 val driver = resolveDriverFor(conn, target)
+                // Throw away anything the printer said after a previous job so it can't be
+                // mistaken for this job's status.
+                target.inp?.let { drainIn(conn, it) }
                 val usbOut = UsbBulkOutputStream(conn, target.out, cancelFlag)
+                val renderStart = SystemClock.elapsedRealtime()
                 if (request.isPdf) {
                     driver.streamPdfJob(request, usbOut, cancelFlag) { s -> setStage(s) }
                 } else {
                     driver.streamPictureJob(request, usbOut, cancelFlag) { s -> setStage(s) }
                 }
+                usbOut.finishTransfer()
                 val secs = (SystemClock.elapsedRealtime() - started) / 1000.0
                 val kb = usbOut.totalBytesSent / 1024
                 val msg = String.format(Locale.US, "Sent %d KB via %s in %.2fs", kb, driver.id.uppercase(Locale.US), secs)
                 log(msg)
-                setStage("Done ($msg)")
+                log(String.format(Locale.US, "Time inside render+send: %.2fs (USB wait: %.2fs)",
+                    (SystemClock.elapsedRealtime() - renderStart) / 1000.0, usbOut.usbWaitMs / 1000.0))
+
+                val inEp = target.inp
+                if (inEp != null) {
+                    setStage("Waiting for printer to finish...")
+                    val ended = awaitJobEnd(conn, inEp)
+                    setStage(if (ended) "Done ($msg)" else "Sent, but printer never confirmed it finished")
+                } else {
+                    log("Interface has no bulk-IN endpoint, cannot read printer status (try 'Cycle USB protocol').")
+                    // Give the printer a moment to take the tail of the stream before we release USB.
+                    Thread.sleep(1500)
+                    setStage("Done ($msg)")
+                }
             } finally {
                 conn.releaseInterface(target.iface)
                 conn.close()
@@ -1009,6 +1037,64 @@ class MainActivity : Activity() {
             if (n <= 0) throw IOException("USB transfer failed (code=$n) at byte $offset/${data.size}.")
             offset += n
         }
+        if (ep.maxPacketSize > 0 && data.size % ep.maxPacketSize == 0) {
+            conn.bulkTransfer(ep, ByteArray(0), 0, 0, 2_000)
+        }
+    }
+
+    /** Discard any pending bytes the printer has queued for us. */
+    private fun drainIn(conn: UsbDeviceConnection, inEp: UsbEndpoint) {
+        val buf = ByteArray(maxOf(inEp.maxPacketSize, 512))
+        var drained = 0
+        while (drained < 65536) {
+            val n = conn.bulkTransfer(inEp, buf, buf.size, 150)
+            if (n <= 0) break
+            drained += n
+        }
+        if (drained > 0) log("Discarded $drained stale status byte(s) from printer.")
+    }
+
+    /**
+     * Reads the printer's unsolicited PJL status ("@PJL USTATUS ...") until it reports that
+     * the job ended, so the app does not close the connection while pages are still in flight.
+     * Everything the printer says (including its front-panel DISPLAY text, e.g. paper-size
+     * prompts) is logged. Returns false if no END arrived in time.
+     */
+    private fun awaitJobEnd(conn: UsbDeviceConnection, inEp: UsbEndpoint, timeoutMs: Long = 120_000): Boolean {
+        val buf = ByteArray(maxOf(inEp.maxPacketSize, 512))
+        val acc = StringBuilder()
+        var reported = 0
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        var lastNote = 0L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (cancelFlag.get()) throw InterruptedException("Cancelled.")
+            val n = conn.bulkTransfer(inEp, buf, buf.size, 1000)
+            if (n > 0) {
+                acc.append(String(buf, 0, n, Charsets.ISO_8859_1))
+                val text = acc.toString()
+                // Log newly arrived complete status blocks (they end with a form feed).
+                var idx = -1
+                while (text.indexOf('\u000C', reported).also { idx = it } >= 0) {
+                    val block = text.substring(reported, idx)
+                        .replace("\r", "").trim().replace("\n", " | ")
+                    if (block.isNotEmpty()) log("Printer: $block")
+                    reported = idx + 1
+                }
+                if (Regex("USTATUS JOB\\s+END").containsMatchIn(text)) {
+                    log("Printer confirmed job end.")
+                    return true
+                }
+            } else {
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastNote > 10_000) {
+                    lastNote = now
+                    log("Still waiting for printer to finish...")
+                }
+            }
+        }
+        log("Printer did not report job end within ${timeoutMs / 1000}s.")
+        if (acc.isNotEmpty()) log("Raw printer reply: " + acc.toString().replace("\r", "").replace("\n", " | ").replace("\u000C", ""))
+        return false
     }
 
     private class UsbBulkOutputStream(
@@ -1018,6 +1104,20 @@ class MainActivity : Activity() {
     ) : OutputStream() {
         var totalBytesSent: Long = 0L
             private set
+        var usbWaitMs: Long = 0L
+            private set
+
+        /**
+         * A bulk transfer is only known to be finished by the device when it ends with a
+         * short packet. If the job length is an exact multiple of the endpoint packet size
+         * the printer would keep waiting for more, so send a zero-length packet.
+         */
+        fun finishTransfer() {
+            val mps = ep.maxPacketSize
+            if (mps > 0 && totalBytesSent > 0 && totalBytesSent % mps == 0L) {
+                conn.bulkTransfer(ep, ByteArray(0), 0, 0, 2_000)
+            }
+        }
 
         override fun write(b: Int) {
             write(byteArrayOf(b.toByte()), 0, 1)
@@ -1031,7 +1131,9 @@ class MainActivity : Activity() {
                     throw InterruptedException("Cancelled.")
                 }
                 val chunk = minOf(16384, remaining)
+                val t0 = SystemClock.elapsedRealtime()
                 val n = conn.bulkTransfer(ep, b, offset, chunk, 10_000)
+                usbWaitMs += SystemClock.elapsedRealtime() - t0
                 if (n <= 0) {
                     throw IOException("USB bulk transfer failed (code=$n) after $totalBytesSent bytes.")
                 }
