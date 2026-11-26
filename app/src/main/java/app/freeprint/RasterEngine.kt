@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object RasterEngine {
 
-    const val BAND_ROWS = 128
+    const val BAND_ROWS = 512
     const val PICTURE_SAFE_MARGIN_DOTS = 24
     private const val TEXT_LUMA_THRESHOLD = 165
 
